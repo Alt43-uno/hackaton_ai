@@ -1,92 +1,79 @@
-# Импортируем необходимые библиотеки
+# импортируем необходимые библиотеки
+import requests
 import cv2
 import face_recognition
-import sqlite3
+from flask import Flask, request, jsonify
 
-# Создаем объект для работы с камерой
-cap = cv2.VideoCapture(0)
+# создаем экземпляр приложения Flask
+app = Flask(__name__)
 
-# Создаем объект для работы с базой данных
-conn = sqlite3.connect('faces.db')
-cur = conn.cursor()
+# создаем глобальную переменную для хранения списка пользователей
+users = []
 
-# Создаем таблицу для хранения путей к файлам и имен пользователей
-cur.execute('CREATE TABLE IF NOT EXISTS faces (face TEXT, name TEXT)')
+# определяем функцию для загрузки пользователей из API JSON
+def load_users():
+    # делаем GET-запрос к API для получения JSON с данными пользователей
+    response = requests.get("http://192.168.88.171:1337/api/bank-users?populate=image")
+    # проверяем, что запрос успешный
+    if response.status_code == 200:
+        # преобразуем JSON в словарь Python
+        data = response.json()
+        # получаем список пользователей из словаря
+        users = data["data"]
+        # возвращаем список пользователей
+        return users
+    # если запрос неуспешный, возвращаем пустой список
+    return []
 
-# Загружаем пути к файлам и имена пользователей из базы данных в память
-faces = []
-names = []
-for row in cur.execute('SELECT face, name FROM faces'):
-    face = row[0] # Присваиваем путь к файлу переменной face
-    name = row[1]
-    # Загружаем изображение с помощью cv2.imread или face_recognition.load_image_file
-    face = cv2.imread(face) # или face = face_recognition.load_image_file(face)
-    # Преобразуем изображение в формат RGB для работы с библиотекой face_recognition
-    face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-    # Извлекаем кодировку лица с помощью face_recognition.face_encodings
-    face = face_recognition.face_encodings(face)
-    # Проверяем, что список не пустой
-    if face:
-        # Берем первый элемент списка
-        face = face[0]
-        faces.append(face)
-        names.append(name)
+# вызываем функцию для загрузки пользователей из API JSON и сохраняем результат в глобальную переменную
+users = load_users()
 
-# Закрываем соединение с базой данных
-conn.close()
+# определяем функцию для проверки пользователя по фото
+def check_user_by_photo(photo_url):
+    # загружаем фото пользователя из URL
+    user_photo = face_recognition.load_image_file(requests.get(photo_url, stream=True).raw)
+    # извлекаем лицо пользователя из фото
+    user_face = face_recognition.face_encodings(user_photo)[0]
+    # перебираем всех пользователей в цикле
+    for user in users:
+        # получаем ID, имя и URL фото из каждого пользователя
+        user_id = user["id"]
+        user_name = user["attributes"]["full_name"]
+        user_photo_url = user["attributes"]["image"]["data"][0]["attributes"]["url"]
+        # добавляем базовый URL к относительному URL фото
+        user_photo_url = "http://192.168.88.171:1337" + user_photo_url
+        # загружаем фото из JSON из URL
+        db_photo = face_recognition.load_image_file(requests.get(user_photo_url, stream=True).raw)
+        # извлекаем лицо из фото
+        db_face = face_recognition.face_encodings(db_photo)[0]
+        # сравниваем лицо пользователя с лицом из JSON
+        match = face_recognition.compare_faces([user_face], db_face)[0]
+        # если лица совпадают, возвращаем ID и имя пользователя
+        if match:
+            return user_id, user_name
+    # если ни одно лицо не совпало, возвращаем None
+    return None
 
-# Основной цикл программы
-while True:
-    # Считываем кадр с камеры
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    # Преобразуем кадр в формат RGB для работы с библиотекой face_recognition
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-    # Обнаруживаем лица на кадре
-    face_locations = face_recognition.face_locations(rgb_frame)
-
-    # Для каждого лица на кадре
-    for face_location in face_locations:
-        # Получаем координаты лица
-        top, right, bottom, left = face_location
-
-        # Вырезаем лицо из кадра
-        face = rgb_frame[top:bottom, left:right]
-
-        # Извлекаем кодировку лица с помощью face_recognition.face_encodings
-        face = face_recognition.face_encodings(face)
-        # Проверяем, что список не пустой
-        if face:
-            # Берем первый элемент списка
-            face = face[0]
-
-            # Сравниваем лицо с лицами из базы данных
-            matches = face_recognition.compare_faces(faces, face)
-
-            # Если есть совпадение, то получаем имя пользователя
-            if True in matches:
-                match_index = matches.index(True)
-                name = names[match_index]
-            else:
-                name = 'Unknown'
+# определяем маршрут для API-запроса
+@app.route("/api/check_user", methods=["GET"])
+def api_check_user():
+    # получаем параметр photo_url из запроса
+    photo_url = request.args.get("photo_url")
+    # проверяем, что параметр не пустой
+    if photo_url:
+        # вызываем функцию для проверки пользователя по фото
+        result = check_user_by_photo(photo_url)
+        # если результат не None, возвращаем JSON-ответ с ID и именем пользователя
+        if result:
+            user_id, user_name = result
+            return jsonify({"user_id": user_id, "user_name": user_name})
+        # иначе возвращаем JSON-ответ с сообщением об ошибке
         else:
-            name = 'Unknown'
-        # Рисуем прямоугольник вокруг лица
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            return jsonify({"error": "User not found"})
+    # если параметр пустой, возвращаем JSON-ответ с сообщением об ошибке
+    else:
+        return jsonify({"error": "Missing photo_url parameter"})
 
-        # Выводим имя пользователя под лицом
-        cv2.putText(frame, name, (left, bottom + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-    # Показываем кадр с распознанными лицами на экране
-    cv2.imshow('Face Recognition', frame)
-
-    # Ждем нажатия клавиши Esc для выхода из программы
-    if cv2.waitKey(1) == 27:
-        break
-
-# Освобождаем ресурсы камеры и закрываем окно
-cap.release()
-cv2.destroyAllWindows()
+# запускаем сервер Flask на локальном хосте и порту 5000
+if __name__ == "__main__":
+    app.run(host="localhost", port=5000)
